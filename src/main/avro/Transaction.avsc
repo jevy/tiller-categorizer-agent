@@ -7,6 +7,7 @@
     {"name": "date",             "type": "string",            "doc": "Transaction date (M/d/yyyy)"},
     {"name": "description",      "type": "string",            "doc": "Short merchant description"},
     {"name": "category",         "type": ["null", "string"],  "default": null, "doc": "Category — null when uncategorized"},
+    {"name": "category_justification", "type": ["null", "string"], "default": null, "doc": "Agent's reasoning for the chosen category"},
     {"name": "amount",           "type": "string",            "doc": "Amount as string (e.g., '-$384.91')"},
     {"name": "account",          "type": "string",            "doc": "Account name"},
     {"name": "account_number",   "type": ["null", "string"],  "default": null, "doc": "Masked account number"},

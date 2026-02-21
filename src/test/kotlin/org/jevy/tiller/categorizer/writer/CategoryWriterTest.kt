@@ -18,10 +18,22 @@ class CategoryWriterTest {
         googleSheetId = "test",
         googleCredentialsJson = "{}",
         anthropicApiKey = "",
-        pollIntervalSeconds = 60,
+        maxTransactionAgeDays = 365,
+        maxTransactions = 0,
+        additionalContextPrompt = null,
+        anthropicModel = "claude-sonnet-4-5-20250929",
     )
 
-    private val sheetsClient = mockk<SheetsClient>(relaxed = true)
+    private val header = listOf<Any>(
+        "Date", "Description", "Category", "Amount", "Account",
+        "Account #", "Institution", "Month", "Week", "Transaction ID",
+        "Check Number", "Full Description", "Note", "Receipt", "Source",
+        "Categorized Date", "Date Added",
+    )
+
+    private val sheetsClient = mockk<SheetsClient>(relaxed = true).also {
+        every { it.readAllRows("Transactions!1:1") } returns listOf(header)
+    }
     private val writer = CategoryWriter(config, sheetsClient)
 
     @Test
@@ -76,16 +88,13 @@ class CategoryWriterTest {
             .setSheetRowNumber(5)
             .build()
 
-        // findRow returns hint
         every { sheetsClient.readAllRows("Transactions!J5:J5") } returns
             listOf(listOf("txn-100" as Any))
-        // existing category
         every { sheetsClient.readAllRows("Transactions!C5:C5") } returns
             listOf(listOf("Existing Category" as Any))
 
         writer.writeCategory(tx)
 
-        // Should NOT write anything
         verify(exactly = 0) { sheetsClient.writeCell(any(), any()) }
     }
 

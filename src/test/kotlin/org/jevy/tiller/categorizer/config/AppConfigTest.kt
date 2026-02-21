@@ -14,14 +14,17 @@ class AppConfigTest {
             googleSheetId = "sheet-123",
             googleCredentialsJson = """{"type":"service_account"}""",
             anthropicApiKey = "sk-test",
-            pollIntervalSeconds = 60,
+            maxTransactionAgeDays = 365,
+            maxTransactions = 0,
+            additionalContextPrompt = null,
+            anthropicModel = "claude-sonnet-4-5-20250929",
         )
 
         assertEquals("localhost:9092", config.kafkaBootstrapServers)
         assertEquals("http://localhost:8081", config.schemaRegistryUrl)
         assertEquals("sheet-123", config.googleSheetId)
         assertEquals("sk-test", config.anthropicApiKey)
-        assertEquals(60L, config.pollIntervalSeconds)
+        assertEquals(365L, config.maxTransactionAgeDays)
     }
 
     @Test

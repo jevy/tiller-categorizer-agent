@@ -7,6 +7,9 @@ import org.jevy.tiller.categorizer.kafka.TopicNames
 import org.jevy.tiller.categorizer.sheets.SheetsClient
 import org.jevy.tiller_categorizer_agent.Transaction
 import org.slf4j.LoggerFactory
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 
 class TransactionProducer(private val config: AppConfig) {
 
@@ -16,16 +19,8 @@ class TransactionProducer(private val config: AppConfig) {
         val sheetsClient = SheetsClient(config)
         val producer = KafkaFactory.createProducer(config)
 
-        while (true) {
-            try {
-                pollAndPublish(sheetsClient, producer)
-            } catch (e: Exception) {
-                logger.error("Error during poll cycle", e)
-            }
-
-            logger.info("Sleeping {} seconds until next poll", config.pollIntervalSeconds)
-            Thread.sleep(config.pollIntervalSeconds * 1000)
-        }
+        pollAndPublish(sheetsClient, producer)
+        producer.close()
     }
 
     private fun pollAndPublish(
@@ -39,12 +34,13 @@ class TransactionProducer(private val config: AppConfig) {
         }
 
         val header = rows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
         var published = 0
 
-        rows.drop(1).forEachIndexed { index, row ->
+        for ((index, row) in rows.drop(1).withIndex()) {
             val rowNumber = index + 2 // 1-indexed, skip header
             try {
-                val transaction = rowToTransaction(row, rowNumber) ?: return@forEachIndexed
+                val transaction = rowToTransaction(row, rowNumber, colIndex, config.maxTransactionAgeDays) ?: continue
 
                 val record = ProducerRecord(TopicNames.UNCATEGORIZED, transaction.getTransactionId().toString(), transaction)
                 producer.send(record) { metadata, exception ->
@@ -56,6 +52,10 @@ class TransactionProducer(private val config: AppConfig) {
                     }
                 }
                 published++
+                if (config.maxTransactions > 0 && published >= config.maxTransactions) {
+                    logger.info("Reached max transactions limit ({}), stopping", config.maxTransactions)
+                    break
+                }
             } catch (e: Exception) {
                 logger.error("Failed to process row {}", rowNumber, e)
             }
@@ -66,29 +66,42 @@ class TransactionProducer(private val config: AppConfig) {
     }
 
     companion object {
-        internal fun rowToTransaction(row: List<Any>, rowNumber: Int): Transaction? {
-            val category = row.getOrNull(2)?.toString() ?: ""
+        internal fun rowToTransaction(row: List<Any>, rowNumber: Int, colIndex: Map<String, Int>, maxAgeDays: Long = 365): Transaction? {
+            fun col(name: String): String? = colIndex[name]?.let { row.getOrNull(it)?.toString() }
+
+            val category = col("Category") ?: ""
             if (category.isNotBlank()) return null
 
-            val transactionId = row.getOrNull(9)?.toString() ?: return null
+            val transactionId = col("Transaction ID") ?: return null
             if (transactionId.isBlank()) return null
+
+            // Skip transactions older than maxAgeDays
+            val dateStr = col("Date") ?: ""
+            if (dateStr.isNotBlank()) {
+                try {
+                    val txDate = LocalDate.parse(dateStr, DateTimeFormatter.ofPattern("M/d/yyyy"))
+                    if (txDate.isBefore(LocalDate.now().minusDays(maxAgeDays))) return null
+                } catch (_: DateTimeParseException) {
+                    // If date can't be parsed, include the transaction
+                }
+            }
 
             return Transaction.newBuilder()
                 .setTransactionId(transactionId)
-                .setDate(row.getOrNull(0)?.toString() ?: "")
-                .setDescription(row.getOrNull(1)?.toString() ?: "")
+                .setDate(col("Date") ?: "")
+                .setDescription(col("Description") ?: "")
                 .setCategory(null)
-                .setAmount(row.getOrNull(3)?.toString() ?: "")
-                .setAccount(row.getOrNull(4)?.toString() ?: "")
-                .setAccountNumber(row.getOrNull(5)?.toString())
-                .setInstitution(row.getOrNull(6)?.toString())
-                .setMonth(row.getOrNull(7)?.toString())
-                .setWeek(row.getOrNull(8)?.toString())
-                .setCheckNumber(row.getOrNull(10)?.toString())
-                .setFullDescription(row.getOrNull(11)?.toString())
-                .setNote(row.getOrNull(12)?.toString())
-                .setSource(row.getOrNull(14)?.toString())
-                .setDateAdded(row.getOrNull(16)?.toString())
+                .setAmount(col("Amount") ?: "")
+                .setAccount(col("Account") ?: "")
+                .setAccountNumber(col("Account #"))
+                .setInstitution(col("Institution"))
+                .setMonth(col("Month"))
+                .setWeek(col("Week"))
+                .setCheckNumber(col("Check Number"))
+                .setFullDescription(col("Full Description"))
+                .setNote(col("Note"))
+                .setSource(col("Source"))
+                .setDateAdded(col("Date Added"))
                 .setSheetRowNumber(rowNumber)
                 .build()
         }

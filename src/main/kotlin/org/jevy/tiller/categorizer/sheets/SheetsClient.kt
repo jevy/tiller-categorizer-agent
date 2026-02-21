@@ -54,18 +54,52 @@ class SheetsClient(private val config: AppConfig) {
         logger.debug("Wrote '{}' to {}", value, range)
     }
 
+    fun readCategories(): List<Map<String, String>> {
+        val rows = readAllRows("Categories!A:D")
+        if (rows.size <= 1) return emptyList()
+
+        val header = rows.first().map { it.toString() }
+        return rows.drop(1)
+            .filter { row -> row.isNotEmpty() && row.first().toString().isNotBlank() }
+            .map { row -> header.zip(row.map { it.toString() }).toMap() }
+    }
+
+    fun searchByCategory(category: String): List<Map<String, String>> {
+        val rows = readAllRows()
+        if (rows.isEmpty()) return emptyList()
+
+        val header = rows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
+        val categoryIdx = colIndex["Category"] ?: return emptyList()
+        val categoryLower = category.lowercase()
+
+        return rows.drop(1)
+            .filter { row ->
+                val cat = row.getOrNull(categoryIdx)?.toString()?.lowercase() ?: ""
+                cat == categoryLower
+            }
+            .takeLast(20)
+            .map { row ->
+                header.zip(row.map { it.toString() }).toMap()
+            }
+    }
+
     fun searchByDescription(query: String): List<Map<String, String>> {
         val rows = readAllRows()
         if (rows.isEmpty()) return emptyList()
 
         val header = rows.first().map { it.toString() }
+        val colIndex = header.withIndex().associate { (i, name) -> name to i }
+        val descIdx = colIndex["Description"] ?: return emptyList()
+        val fullDescIdx = colIndex["Full Description"] ?: return emptyList()
+        val categoryIdx = colIndex["Category"] ?: return emptyList()
         val queryLower = query.lowercase()
 
         return rows.drop(1)
             .filter { row ->
-                val desc = row.getOrNull(1)?.toString()?.lowercase() ?: ""
-                val fullDesc = row.getOrNull(11)?.toString()?.lowercase() ?: ""
-                val category = row.getOrNull(2)?.toString() ?: ""
+                val desc = row.getOrNull(descIdx)?.toString()?.lowercase() ?: ""
+                val fullDesc = row.getOrNull(fullDescIdx)?.toString()?.lowercase() ?: ""
+                val category = row.getOrNull(categoryIdx)?.toString() ?: ""
                 category.isNotBlank() && (desc.contains(queryLower) || fullDesc.contains(queryLower))
             }
             .take(20)

@@ -10,7 +10,6 @@ import com.anthropic.models.messages.Model
 import com.anthropic.models.messages.StopReason
 import com.anthropic.models.messages.Tool
 import com.anthropic.models.messages.ToolResultBlockParam
-import com.google.gson.JsonParser
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.tiller.categorizer.categorizer.tools.SheetLookupTool
 import org.jevy.tiller.categorizer.categorizer.tools.WebSearchTool
@@ -31,21 +30,39 @@ class CategorizerAgent(private val config: AppConfig) {
 
     private val client: AnthropicClient = AnthropicOkHttpClient.builder()
         .apiKey(config.anthropicApiKey)
+        .responseValidation(true)
         .build()
 
-    private val systemPrompt = """
+    private val systemPrompt: String by lazy {
+        val categories = sheetsClient.readCategories()
+        val categoryList = categories.joinToString("\n") { row ->
+            val name = row["Category"] ?: ""
+            val group = row["Group"] ?: ""
+            val type = row["Type"] ?: ""
+            "- $name ($group, $type)"
+        }
+        logger.info("Loaded {} categories from sheet", categories.size)
+
+        """
         You are a bookkeeping assistant that categorizes financial transactions.
         You have access to the user's transaction history in a Google Sheet.
         Your job is to determine the correct category for a given transaction.
 
+        Available categories:
+        $categoryList
+
         Rules:
-        - Use ONLY categories that already exist in the user's sheet. Never invent new categories.
+        - Use ONLY the categories listed above. Never invent new categories.
         - Look at past transactions with similar descriptions to determine the category.
         - If a merchant is unfamiliar, use web search to understand what the business is.
+        - Before giving your final answer, use category_lookup to review the last 20 transactions in your proposed category. Make sure the transaction fits the pattern.
         - If you cannot determine a category with confidence, respond with null.
 
-        Respond with ONLY the category name, or null if unsure. No explanation needed.
-    """.trimIndent()
+        When you have determined the category, call the submit_category tool with the category and justification.
+        If you cannot determine a category with confidence, call submit_category with category "null".
+        ${config.additionalContextPrompt?.let { "\nAdditional context about the user:\n$it" } ?: ""}
+        """.trimIndent()
+    }
 
     private val tools = listOf(
         Tool.builder()
@@ -82,6 +99,45 @@ class CategorizerAgent(private val config: AppConfig) {
                     .build()
             )
             .build(),
+        Tool.builder()
+            .name("category_lookup")
+            .description("Retrieve the last 20 transactions for a given category. Use this to verify your proposed category fits by reviewing what other transactions are in it.")
+            .inputSchema(
+                Tool.InputSchema.builder()
+                    .properties(
+                        Tool.InputSchema.Properties.builder()
+                            .putAdditionalProperty("category", JsonValue.from(mapOf(
+                                "type" to "string",
+                                "description" to "The exact category name to look up",
+                            )))
+                            .build()
+                    )
+                    .addRequired("category")
+                    .build()
+            )
+            .build(),
+        Tool.builder()
+            .name("submit_category")
+            .description("Submit your final categorization. Call this when you have determined the category for the transaction.")
+            .inputSchema(
+                Tool.InputSchema.builder()
+                    .properties(
+                        Tool.InputSchema.Properties.builder()
+                            .putAdditionalProperty("category", JsonValue.from(mapOf(
+                                "type" to "string",
+                                "description" to "The exact category name, or null if you cannot determine it",
+                            )))
+                            .putAdditionalProperty("justification", JsonValue.from(mapOf(
+                                "type" to "string",
+                                "description" to "Brief explanation of why this category was chosen",
+                            )))
+                            .build()
+                    )
+                    .addRequired("category")
+                    .addRequired("justification")
+                    .build()
+            )
+            .build(),
     )
 
     fun run() {
@@ -101,13 +157,14 @@ class CategorizerAgent(private val config: AppConfig) {
                         continue
                     }
 
-                    val category = categorize(transaction)
-                    if (category != null) {
+                    val result = categorize(transaction)
+                    if (result != null) {
                         val categorized = Transaction.newBuilder(transaction)
-                            .setCategory(category)
+                            .setCategory(result.category)
+                            .setCategoryJustification(result.justification)
                             .build()
                         producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
-                        logger.info("Categorized '{}' as '{}'", transaction.getDescription(), category)
+                        logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result.category, result.justification)
                     } else {
                         producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transaction.getTransactionId().toString(), transaction))
                         logger.warn("Could not categorize '{}'", transaction.getDescription())
@@ -120,7 +177,9 @@ class CategorizerAgent(private val config: AppConfig) {
         }
     }
 
-    internal fun categorize(transaction: Transaction): String? {
+    data class CategorizationResult(val category: String, val justification: String?)
+
+    internal fun categorize(transaction: Transaction): CategorizationResult? {
         // Store messages as Any since addMessage() accepts both MessageParam and Message
         val messageHistory = mutableListOf<Any>(
             MessageParam.builder()
@@ -136,9 +195,9 @@ class CategorizerAgent(private val config: AppConfig) {
                 .build()
         )
 
-        repeat(5) { // max tool-use rounds
+        repeat(8) { // max tool-use rounds
             val paramsBuilder = MessageCreateParams.builder()
-                .model(Model.CLAUDE_SONNET_4_5)
+                .model(Model.of(config.anthropicModel))
                 .maxTokens(1024L)
                 .system(systemPrompt)
 
@@ -156,14 +215,30 @@ class CategorizerAgent(private val config: AppConfig) {
             val response: com.anthropic.models.messages.Message = client.messages().create(paramsBuilder.build())
 
             if (response.stopReason().orElse(null) != StopReason.TOOL_USE) {
-                // No tool calls — extract text response
+                // No tool calls — fallback to text response
                 val text = response.content()
                     .firstOrNull { it.isText() }
                     ?.asText()
                     ?.text()
                     ?.trim()
                     ?: return null
-                return if (text.equals("null", ignoreCase = true)) null else text
+                logger.warn("Agent responded with text instead of submit_category tool: {}", text)
+                return if (text.equals("null", ignoreCase = true)) null
+                    else CategorizationResult(category = text, justification = null)
+            }
+
+            // Check if submit_category was called — that's our final answer
+            val submitCall = response.content()
+                .filter { it.isToolUse() }
+                .firstOrNull { it.asToolUse().name() == "submit_category" }
+
+            if (submitCall != null) {
+                @Suppress("UNCHECKED_CAST")
+                val args = submitCall.asToolUse()._input().asObject().get() as Map<String, JsonValue>
+                val category = args["category"]!!.asStringOrThrow()
+                val justification = args["justification"]?.asStringOrThrow()
+                return if (category.equals("null", ignoreCase = true)) null
+                    else CategorizationResult(category = category, justification = justification)
             }
 
             // Add the assistant's response (with tool_use blocks) back to the conversation
@@ -174,17 +249,22 @@ class CategorizerAgent(private val config: AppConfig) {
                 .filter { it.isToolUse() }
                 .map { block ->
                     val toolUse = block.asToolUse()
-                    val inputJson = toolUse._input().toString()
-                    val args = JsonParser.parseString(inputJson).asJsonObject
-                    val query = args.get("query").asString
+                    @Suppress("UNCHECKED_CAST")
+                    val args = toolUse._input().asObject().get() as Map<String, JsonValue>
 
                     val toolResult = when (toolUse.name()) {
-                        "sheet_lookup" -> sheetLookupTool.execute(query)
-                        "web_search" -> webSearchTool.execute(query)
+                        "sheet_lookup" -> sheetLookupTool.execute(args["query"]!!.asStringOrThrow())
+                        "web_search" -> webSearchTool.execute(args["query"]!!.asStringOrThrow())
+                        "category_lookup" -> {
+                            val category = args["category"]!!.asStringOrThrow()
+                            val results = sheetsClient.searchByCategory(category)
+                            logger.info("Category lookup '{}': {} transactions", category, results.size)
+                            com.google.gson.Gson().toJson(results)
+                        }
                         else -> "Unknown tool: ${toolUse.name()}"
                     }
 
-                    logger.debug("Tool '{}' query='{}' result length={}", toolUse.name(), query, toolResult.length)
+                    logger.debug("Tool '{}' args='{}' result length={}", toolUse.name(), args, toolResult.length)
 
                     ContentBlockParam.ofToolResult(
                         ToolResultBlockParam.builder()

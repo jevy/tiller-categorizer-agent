@@ -1,0 +1,95 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+    ports:
+      - "19092:19092"   # Kafka (external)
+      - "18081:18081"   # Schema Registry (external)
+      - "18082:18082"   # Pandaproxy (external)
+      - "9644:9644"     # Admin API
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-console:
+    image: redpandadata/console:v2.8.0
+    ports:
+      - "8080:8080"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  kafbat-ui:
+    image: docker.io/kafbat/kafka-ui:v1.4.2
+    ports:
+      - "8088:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: redpanda
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://redpanda:8081
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  producer:
+    build: .
+    command: ["producer"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
+      GOOGLE_CREDENTIALS_JSON: /app/credentials/service-account.json
+      MAX_TRANSACTION_AGE_DAYS: "365"
+      MAX_TRANSACTIONS: "20"
+    volumes:
+      - ./service-account.json:/app/credentials/service-account.json:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  categorizer:
+    build: .
+    command: ["categorizer"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
+      GOOGLE_CREDENTIALS_JSON: /app/credentials/service-account.json
+    volumes:
+      - ./service-account.json:/app/credentials/service-account.json:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  writer:
+    build: .
+    command: ["writer"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SCHEMA_REGISTRY_URL: http://redpanda:8081
+      GOOGLE_CREDENTIALS_JSON: /app/credentials/service-account.json
+    volumes:
+      - ./service-account.json:/app/credentials/service-account.json:ro
+    depends_on:
+      redpanda:
+        condition: service_healthy

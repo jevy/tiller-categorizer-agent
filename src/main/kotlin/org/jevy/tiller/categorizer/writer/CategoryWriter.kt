@@ -14,6 +14,25 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
 
     private val logger = LoggerFactory.getLogger(CategoryWriter::class.java)
 
+    // Resolve column letters from header row on first use
+    private val columnLetters: Map<String, String> by lazy {
+        val header = sheetsClient.readAllRows("Transactions!1:1").firstOrNull()?.map { it.toString() } ?: emptyList()
+        header.withIndex().associate { (i, name) -> name to indexToColumnLetter(i) }.also {
+            logger.info("Resolved column letters: Category={}, Transaction ID={}, Categorized Date={}",
+                it["Category"], it["Transaction ID"], it["Categorized Date"])
+        }
+    }
+
+    private fun indexToColumnLetter(index: Int): String {
+        var result = ""
+        var i = index
+        while (i >= 0) {
+            result = ('A' + i % 26) + result
+            i = i / 26 - 1
+        }
+        return result
+    }
+
     fun run() {
         val consumer = KafkaFactory.createConsumer(config, "category-writer")
         consumer.subscribe(listOf(TopicNames.CATEGORIZED))
@@ -47,29 +66,34 @@ class CategoryWriter(private val config: AppConfig, private val sheetsClient: Sh
             return
         }
 
+        val categoryCol = columnLetters["Category"] ?: "C"
+        val categorizedDateCol = columnLetters["Categorized Date"] ?: "P"
+
         // Check if already categorized
-        val rows = sheetsClient.readAllRows("Transactions!C$rowNumber:C$rowNumber")
+        val rows = sheetsClient.readAllRows("Transactions!${categoryCol}$rowNumber:${categoryCol}$rowNumber")
         val existing = rows.firstOrNull()?.firstOrNull()?.toString() ?: ""
         if (existing.isNotBlank()) {
             logger.info("Transaction {} already has category '{}', skipping", transactionId, existing)
             return
         }
 
-        // Write category (column C) and categorized date (column P)
-        sheetsClient.writeCell("Transactions!C$rowNumber", category)
-        sheetsClient.writeCell("Transactions!P$rowNumber", LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
+        // Write category and categorized date
+        sheetsClient.writeCell("Transactions!${categoryCol}$rowNumber", category)
+        sheetsClient.writeCell("Transactions!${categorizedDateCol}$rowNumber", LocalDate.now().format(DateTimeFormatter.ofPattern("M/d/yyyy")))
         logger.info("Wrote category '{}' to row {} for transaction {}", category, rowNumber, transactionId)
     }
 
     internal fun findRow(transactionId: String, hintRow: Int): Int? {
+        val txIdCol = columnLetters["Transaction ID"] ?: "J"
+
         // Try the hint row first
-        val hintRows = sheetsClient.readAllRows("Transactions!J$hintRow:J$hintRow")
+        val hintRows = sheetsClient.readAllRows("Transactions!${txIdCol}$hintRow:${txIdCol}$hintRow")
         val hintId = hintRows.firstOrNull()?.firstOrNull()?.toString() ?: ""
         if (hintId == transactionId) return hintRow
 
         // Fall back to scanning all rows
         logger.debug("Hint row {} didn't match, scanning for transaction {}", hintRow, transactionId)
-        val allRows = sheetsClient.readAllRows("Transactions!J:J")
+        val allRows = sheetsClient.readAllRows("Transactions!${txIdCol}:${txIdCol}")
         for ((index, row) in allRows.withIndex()) {
             if (row.firstOrNull()?.toString() == transactionId) {
                 return index + 1 // 1-indexed

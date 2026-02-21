@@ -6,7 +6,10 @@ data class AppConfig(
     val googleSheetId: String,
     val googleCredentialsJson: String,
     val anthropicApiKey: String,
-    val pollIntervalSeconds: Long,
+    val maxTransactionAgeDays: Long,
+    val maxTransactions: Int,
+    val additionalContextPrompt: String?,
+    val anthropicModel: String,
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
@@ -15,7 +18,10 @@ data class AppConfig(
             googleSheetId = requireEnv("GOOGLE_SHEET_ID"),
             googleCredentialsJson = requireEnv("GOOGLE_CREDENTIALS_JSON"),
             anthropicApiKey = System.getenv("ANTHROPIC_API_KEY") ?: "",
-            pollIntervalSeconds = System.getenv("POLL_INTERVAL_SECONDS")?.toLongOrNull() ?: 300L,
+            maxTransactionAgeDays = System.getenv("MAX_TRANSACTION_AGE_DAYS")?.toLongOrNull() ?: 365L,
+            maxTransactions = System.getenv("MAX_TRANSACTIONS")?.toIntOrNull() ?: 0,
+            additionalContextPrompt = System.getenv("ADDITIONAL_CONTEXT_PROMPT")?.takeIf { it.isNotBlank() },
+            anthropicModel = System.getenv("ANTHROPIC_MODEL") ?: "claude-sonnet-4-5-20250929",
         )
 
         private fun requireEnv(name: String): String =

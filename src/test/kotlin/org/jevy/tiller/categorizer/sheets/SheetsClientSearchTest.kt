@@ -16,7 +16,10 @@ class SheetsClientSearchTest {
         googleSheetId = "test",
         googleCredentialsJson = "{}",
         anthropicApiKey = "",
-        pollIntervalSeconds = 60,
+        maxTransactionAgeDays = 365,
+        maxTransactions = 0,
+        additionalContextPrompt = null,
+        anthropicModel = "claude-sonnet-4-5-20250929",
     )
 
     private fun makeSheetsClient(rows: List<List<Any>>): SheetsClient {

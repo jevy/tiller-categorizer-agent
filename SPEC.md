@@ -229,7 +229,8 @@ tiller-categorizer-agent/
 | `GOOGLE_SHEET_ID`           | Producer, Writer, Categorizer | The spreadsheet ID from the sheet URL |
 | `GOOGLE_CREDENTIALS_JSON`   | Producer, Writer, Categorizer | Service account JSON key (as string or file path) |
 | `ANTHROPIC_API_KEY`         | Categorizer          | Anthropic API key                        |
-| `POLL_INTERVAL_SECONDS`     | Producer             | How often to poll (default: 300)         |
+| `MAX_TRANSACTION_AGE_DAYS`  | Producer             | Skip transactions older than N days (default: 365) |
+| `MAX_TRANSACTIONS`          | Producer             | Limit transactions per run, 0=unlimited (default: 0) |
 
 ## Kafka Cluster Details (Existing)
 
