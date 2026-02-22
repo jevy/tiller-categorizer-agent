@@ -13,6 +13,9 @@ devenv.local.yaml
 .env
 service-account.json
 
+# Local database
+kls_database.db
+
 # Gradle
 .gradle/
 build/
