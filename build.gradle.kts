@@ -57,6 +57,10 @@ tasks.test {
     useJUnitPlatform()
 }
 
+tasks.compileKotlin {
+    dependsOn(tasks.generateAvroJava)
+}
+
 kotlin {
     jvmToolchain(21)
 }
