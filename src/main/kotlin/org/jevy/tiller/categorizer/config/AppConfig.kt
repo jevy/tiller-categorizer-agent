@@ -21,7 +21,7 @@ data class AppConfig(
             maxTransactionAgeDays = System.getenv("MAX_TRANSACTION_AGE_DAYS")?.toLongOrNull() ?: 365L,
             maxTransactions = System.getenv("MAX_TRANSACTIONS")?.toIntOrNull() ?: 0,
             additionalContextPrompt = System.getenv("ADDITIONAL_CONTEXT_PROMPT")?.takeIf { it.isNotBlank() },
-            anthropicModel = System.getenv("ANTHROPIC_MODEL") ?: "claude-sonnet-4-5-20250929",
+            anthropicModel = System.getenv("ANTHROPIC_MODEL") ?: "claude-sonnet-4-6",
         )
 
         private fun requireEnv(name: String): String =

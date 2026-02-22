@@ -53,7 +53,7 @@ All configuration is via environment variables:
 | `GOOGLE_SHEET_ID` | All | Spreadsheet ID from the Google Sheets URL |
 | `GOOGLE_CREDENTIALS_JSON` | All | Path to service account JSON key file |
 | `ANTHROPIC_API_KEY` | Categorizer | Anthropic API key |
-| `ANTHROPIC_MODEL` | Categorizer | Model to use (default: `claude-sonnet-4-5-20250929`) |
+| `ANTHROPIC_MODEL` | Categorizer | Model to use (default: `claude-sonnet-4-6`) |
 | `BRAVE_API_KEY` | Categorizer | Brave Search API key (optional) |
 | `ADDITIONAL_CONTEXT_PROMPT` | Categorizer | Extra context about the user for the agent (optional) |
 | `MAX_TRANSACTION_AGE_DAYS` | Producer | Skip transactions older than N days (default: 365) |

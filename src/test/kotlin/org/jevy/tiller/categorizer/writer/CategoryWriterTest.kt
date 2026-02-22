@@ -21,7 +21,7 @@ class CategoryWriterTest {
         maxTransactionAgeDays = 365,
         maxTransactions = 0,
         additionalContextPrompt = null,
-        anthropicModel = "claude-sonnet-4-5-20250929",
+        anthropicModel = "claude-sonnet-4-6",
     )
 
     private val header = listOf<Any>(
