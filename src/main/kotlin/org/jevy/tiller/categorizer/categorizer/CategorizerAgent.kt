@@ -20,6 +20,7 @@ import org.jevy.tiller.categorizer.sheets.SheetsClient
 import org.jevy.tiller_categorizer_agent.Transaction
 import org.slf4j.LoggerFactory
 import java.time.Duration
+import kotlin.math.min
 
 class CategorizerAgent(private val config: AppConfig) {
 
@@ -165,6 +166,8 @@ class CategorizerAgent(private val config: AppConfig) {
         consumer.subscribe(listOf(TopicNames.UNCATEGORIZED))
         logger.info("Subscribed to {}", TopicNames.UNCATEGORIZED)
 
+        var consecutiveErrors = 0
+
         while (true) {
             val records = consumer.poll(Duration.ofSeconds(5))
             for (record in records) {
@@ -176,6 +179,7 @@ class CategorizerAgent(private val config: AppConfig) {
                     }
 
                     val result = categorize(transaction)
+                    consecutiveErrors = 0
                     if (result != null) {
                         val categorized = Transaction.newBuilder(transaction)
                             .setCategory(result.category)
@@ -188,11 +192,40 @@ class CategorizerAgent(private val config: AppConfig) {
                         logger.warn("Could not categorize '{}'", transaction.getDescription())
                     }
                 } catch (e: Exception) {
-                    logger.error("Error categorizing transaction", e)
+                    consecutiveErrors++
+                    val backoffMs = min(1000L * (1L shl min(consecutiveErrors - 1, 8)), 300_000L)
+                    logger.error("Error categorizing transaction (consecutive errors: {}, backing off {}s)", consecutiveErrors, backoffMs / 1000, e)
+                    Thread.sleep(backoffMs)
                 }
             }
             consumer.commitSync()
         }
+    }
+
+    private fun callApiWithRetry(
+        params: MessageCreateParams,
+        maxAttempts: Int = 4,
+        initialDelayMs: Long = 1000L,
+    ): com.anthropic.models.messages.Message {
+        var lastException: Exception? = null
+        for (attempt in 1..maxAttempts) {
+            try {
+                return client.messages().create(params)
+            } catch (e: com.anthropic.errors.RateLimitException) {
+                lastException = e
+                if (attempt == maxAttempts) break
+                val delayMs = initialDelayMs * (1L shl (attempt - 1))
+                logger.warn("Rate limited (attempt {}/{}), retrying in {}s", attempt, maxAttempts, delayMs / 1000)
+                Thread.sleep(delayMs)
+            } catch (e: com.anthropic.errors.InternalServerException) {
+                lastException = e
+                if (attempt == maxAttempts) break
+                val delayMs = initialDelayMs * (1L shl (attempt - 1))
+                logger.warn("Server error (attempt {}/{}), retrying in {}s", attempt, maxAttempts, delayMs / 1000)
+                Thread.sleep(delayMs)
+            }
+        }
+        throw lastException!!
     }
 
     data class CategorizationResult(val category: String, val justification: String?)
@@ -230,7 +263,7 @@ class CategorizerAgent(private val config: AppConfig) {
                 }
             }
 
-            val response: com.anthropic.models.messages.Message = client.messages().create(paramsBuilder.build())
+            val response: com.anthropic.models.messages.Message = callApiWithRetry(paramsBuilder.build())
 
             if (response.stopReason().orElse(null) != StopReason.TOOL_USE) {
                 // No tool calls — fallback to text response
