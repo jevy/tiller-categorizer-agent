@@ -13,17 +13,17 @@ class AppConfigTest {
             schemaRegistryUrl = "http://localhost:8081",
             googleSheetId = "sheet-123",
             googleCredentialsJson = """{"type":"service_account"}""",
-            anthropicApiKey = "sk-test",
+            openrouterApiKey = "sk-test",
             maxTransactionAgeDays = 365,
             maxTransactions = 0,
             additionalContextPrompt = null,
-            anthropicModel = "claude-sonnet-4-6",
+            model = "anthropic/claude-sonnet-4-6",
         )
 
         assertEquals("localhost:9092", config.kafkaBootstrapServers)
         assertEquals("http://localhost:8081", config.schemaRegistryUrl)
         assertEquals("sheet-123", config.googleSheetId)
-        assertEquals("sk-test", config.anthropicApiKey)
+        assertEquals("sk-test", config.openrouterApiKey)
         assertEquals(365L, config.maxTransactionAgeDays)
     }
 

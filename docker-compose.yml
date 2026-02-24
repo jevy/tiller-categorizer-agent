@@ -74,6 +74,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       SCHEMA_REGISTRY_URL: http://redpanda:8081
       GOOGLE_CREDENTIALS_JSON: /app/credentials/service-account.json
+      MODEL: "minimax/minimax-m2.5"
     volumes:
       - ./service-account.json:/app/credentials/service-account.json:ro
     depends_on:

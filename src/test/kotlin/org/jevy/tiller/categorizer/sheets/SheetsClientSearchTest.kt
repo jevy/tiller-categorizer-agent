@@ -15,11 +15,11 @@ class SheetsClientSearchTest {
         schemaRegistryUrl = "http://localhost:8081",
         googleSheetId = "test",
         googleCredentialsJson = "{}",
-        anthropicApiKey = "",
+        openrouterApiKey = "",
         maxTransactionAgeDays = 365,
         maxTransactions = 0,
         additionalContextPrompt = null,
-        anthropicModel = "claude-sonnet-4-6",
+        model = "anthropic/claude-sonnet-4-6",
     )
 
     private fun makeSheetsClient(rows: List<List<Any>>): SheetsClient {

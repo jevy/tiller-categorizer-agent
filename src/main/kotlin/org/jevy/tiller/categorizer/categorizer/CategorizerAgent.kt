@@ -1,15 +1,10 @@
 package org.jevy.tiller.categorizer.categorizer
 
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
-import com.anthropic.core.JsonValue
-import com.anthropic.models.messages.ContentBlockParam
-import com.anthropic.models.messages.MessageCreateParams
-import com.anthropic.models.messages.MessageParam
-import com.anthropic.models.messages.Model
-import com.anthropic.models.messages.StopReason
-import com.anthropic.models.messages.Tool
-import com.anthropic.models.messages.ToolResultBlockParam
+import com.google.gson.Gson
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import io.micrometer.observation.ObservationRegistry
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.jevy.tiller.categorizer.categorizer.tools.SheetLookupTool
 import org.jevy.tiller.categorizer.categorizer.tools.WebSearchTool
@@ -19,20 +14,54 @@ import org.jevy.tiller.categorizer.kafka.TopicNames
 import org.jevy.tiller.categorizer.sheets.SheetsClient
 import org.jevy.tiller_categorizer_agent.Transaction
 import org.slf4j.LoggerFactory
+import org.springframework.ai.chat.client.ChatClient
+import org.springframework.ai.openai.OpenAiChatModel
+import org.springframework.ai.openai.OpenAiChatOptions
+import org.springframework.ai.openai.api.OpenAiApi
+import org.springframework.ai.tool.annotation.Tool
+import org.springframework.ai.tool.annotation.ToolParam
+import org.springframework.ai.model.tool.ToolCallingManager
+import org.springframework.retry.support.RetryTemplate
 import java.time.Duration
 import kotlin.math.min
 
-class CategorizerAgent(private val config: AppConfig) {
+class CategorizerAgent(
+    private val config: AppConfig,
+    private val meterRegistry: MeterRegistry = SimpleMeterRegistry(),
+) {
 
     private val logger = LoggerFactory.getLogger(CategorizerAgent::class.java)
     private val sheetsClient = SheetsClient(config)
     private val sheetLookupTool = SheetLookupTool(sheetsClient)
     private val webSearchTool = WebSearchTool(System.getenv("BRAVE_API_KEY") ?: "")
+    private val gson = Gson()
 
-    private val client: AnthropicClient = AnthropicOkHttpClient.builder()
-        .apiKey(config.anthropicApiKey)
-        .responseValidation(true)
-        .build()
+    private val categorizedCounter = meterRegistry.counter("tiller.categorizer.transactions", "result", "categorized")
+    private val unknownCounter = meterRegistry.counter("tiller.categorizer.transactions", "result", "unknown")
+    private val failedCounter = meterRegistry.counter("tiller.categorizer.failed")
+    private val durationTimer = meterRegistry.timer("tiller.categorizer.duration")
+
+    private val observationRegistry = ObservationRegistry.create().apply {
+        observationConfig().observationHandler(DefaultMeterObservationHandler(meterRegistry))
+    }
+
+    private val chatClient: ChatClient = run {
+        val api = OpenAiApi.builder()
+            .baseUrl("https://openrouter.ai/api")
+            .apiKey(config.openrouterApiKey)
+            .build()
+        val chatModel = OpenAiChatModel(
+            api,
+            OpenAiChatOptions.builder()
+                .model(config.model)
+                .maxTokens(1024)
+                .build(),
+            ToolCallingManager.builder().build(),
+            RetryTemplate.defaultInstance(),
+            observationRegistry,
+        )
+        ChatClient.builder(chatModel).build()
+    }
 
     private val systemPrompt: String by lazy {
         val categories = sheetsClient.readCategories()
@@ -66,98 +95,56 @@ class CategorizerAgent(private val config: AppConfig) {
         """.trimIndent()
     }
 
-    private val tools = listOf(
-        Tool.builder()
-            .name("sheet_lookup")
-            .description("Search past transactions in the Google Sheet by description. Returns rows that have been previously categorized with similar merchant names.")
-            .inputSchema(
-                Tool.InputSchema.builder()
-                    .properties(
-                        Tool.InputSchema.Properties.builder()
-                            .putAdditionalProperty("query", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "Search term to match against the Description or Full Description columns",
-                            )))
-                            .build()
-                    )
-                    .addRequired("query")
-                    .build()
-            )
-            .build(),
-        Tool.builder()
-            .name("web_search")
-            .description("Search the web to identify an unfamiliar merchant or transaction description.")
-            .inputSchema(
-                Tool.InputSchema.builder()
-                    .properties(
-                        Tool.InputSchema.Properties.builder()
-                            .putAdditionalProperty("query", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "Search query",
-                            )))
-                            .build()
-                    )
-                    .addRequired("query")
-                    .build()
-            )
-            .build(),
-        Tool.builder()
-            .name("category_lookup")
-            .description("Retrieve the last 20 transactions for a given category. Use this to verify your proposed category fits by reviewing what other transactions are in it.")
-            .inputSchema(
-                Tool.InputSchema.builder()
-                    .properties(
-                        Tool.InputSchema.Properties.builder()
-                            .putAdditionalProperty("category", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "The exact category name to look up",
-                            )))
-                            .build()
-                    )
-                    .addRequired("category")
-                    .build()
-            )
-            .build(),
-        Tool.builder()
-            .name("autocat_lookup")
-            .description("Search the AutoCat rules sheet for matching categorization rules. AutoCat rules map transaction descriptions to categories. Check this first to see if a rule already exists for the transaction.")
-            .inputSchema(
-                Tool.InputSchema.builder()
-                    .properties(
-                        Tool.InputSchema.Properties.builder()
-                            .putAdditionalProperty("description", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "The transaction description to match against AutoCat rules",
-                            )))
-                            .build()
-                    )
-                    .addRequired("description")
-                    .build()
-            )
-            .build(),
-        Tool.builder()
-            .name("submit_category")
-            .description("Submit your final categorization. Call this when you have determined the category for the transaction.")
-            .inputSchema(
-                Tool.InputSchema.builder()
-                    .properties(
-                        Tool.InputSchema.Properties.builder()
-                            .putAdditionalProperty("category", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "The exact category name, or null if you cannot determine it",
-                            )))
-                            .putAdditionalProperty("justification", JsonValue.from(mapOf(
-                                "type" to "string",
-                                "description" to "Brief explanation of why this category was chosen",
-                            )))
-                            .build()
-                    )
-                    .addRequired("category")
-                    .addRequired("justification")
-                    .build()
-            )
-            .build(),
-    )
+    data class CategorizationResult(val category: String, val justification: String?)
+
+    private inner class CategorizerTools {
+        var submitResult: CategorizationResult? = null
+
+        @Tool(name = "sheet_lookup", description = "Search past transactions in the Google Sheet by description. Returns rows that have been previously categorized with similar merchant names.")
+        fun sheetLookup(
+            @ToolParam(description = "Search term to match against the Description or Full Description columns") query: String,
+        ): String {
+            meterRegistry.counter("tiller.categorizer.tool.calls", "tool", "sheet_lookup").increment()
+            return sheetLookupTool.execute(query)
+        }
+
+        @Tool(name = "web_search", description = "Search the web to identify an unfamiliar merchant or transaction description.")
+        fun webSearch(
+            @ToolParam(description = "Search query") query: String,
+        ): String {
+            meterRegistry.counter("tiller.categorizer.tool.calls", "tool", "web_search").increment()
+            return webSearchTool.execute(query)
+        }
+
+        @Tool(name = "category_lookup", description = "Retrieve the last 20 transactions for a given category. Use this to verify your proposed category fits by reviewing what other transactions are in it.")
+        fun categoryLookup(
+            @ToolParam(description = "The exact category name to look up") category: String,
+        ): String {
+            meterRegistry.counter("tiller.categorizer.tool.calls", "tool", "category_lookup").increment()
+            val results = sheetsClient.searchByCategory(category)
+            logger.info("Category lookup '{}': {} transactions", category, results.size)
+            return gson.toJson(results)
+        }
+
+        @Tool(name = "autocat_lookup", description = "Search the AutoCat rules sheet for matching categorization rules. AutoCat rules map transaction descriptions to categories. Check this first to see if a rule already exists for the transaction.")
+        fun autocatLookup(
+            @ToolParam(description = "The transaction description to match against AutoCat rules") description: String,
+        ): String {
+            meterRegistry.counter("tiller.categorizer.tool.calls", "tool", "autocat_lookup").increment()
+            val results = sheetsClient.searchAutocat(description)
+            logger.info("AutoCat lookup '{}': {} rules matched", description, results.size)
+            return gson.toJson(results)
+        }
+
+        @Tool(name = "submit_category", description = "Submit your final categorization. Call this when you have determined the category for the transaction.")
+        fun submitCategory(
+            @ToolParam(description = "The exact category name, or 'null' if you cannot determine it") category: String,
+            @ToolParam(description = "Brief explanation of why this category was chosen") justification: String?,
+        ): String {
+            submitResult = CategorizationResult(category, justification)
+            return "Category submitted successfully"
+        }
+    }
 
     fun run() {
         val consumer = KafkaFactory.createConsumer(config, "categorizer-agent")
@@ -178,18 +165,23 @@ class CategorizerAgent(private val config: AppConfig) {
                         continue
                     }
 
-                    val result = categorize(transaction)
+                    var result: CategorizationResult? = null
+                    durationTimer.record(Runnable { result = categorize(transaction) })
                     consecutiveErrors = 0
+
                     if (result != null) {
                         val categorized = Transaction.newBuilder(transaction)
-                            .setCategory(result.category)
-                            .setCategoryJustification(result.justification)
+                            .setCategory(result!!.category)
+                            .setCategoryJustification(result!!.justification)
                             .build()
                         producer.send(ProducerRecord(TopicNames.CATEGORIZED, categorized.getTransactionId().toString(), categorized))
-                        logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result.category, result.justification)
+                        logger.info("Categorized '{}' as '{}' ({})", transaction.getDescription(), result!!.category, result!!.justification)
+                        if (result!!.category.equals("Unknown", ignoreCase = true)) unknownCounter.increment()
+                        else categorizedCounter.increment()
                     } else {
                         producer.send(ProducerRecord(TopicNames.CATEGORIZATION_FAILED, transaction.getTransactionId().toString(), transaction))
                         logger.warn("Could not categorize '{}'", transaction.getDescription())
+                        failedCounter.increment()
                     }
                 } catch (e: Exception) {
                     consecutiveErrors++
@@ -202,144 +194,29 @@ class CategorizerAgent(private val config: AppConfig) {
         }
     }
 
-    private fun callApiWithRetry(
-        params: MessageCreateParams,
-        maxAttempts: Int = 4,
-        initialDelayMs: Long = 1000L,
-    ): com.anthropic.models.messages.Message {
-        var lastException: Exception? = null
-        for (attempt in 1..maxAttempts) {
-            try {
-                return client.messages().create(params)
-            } catch (e: com.anthropic.errors.RateLimitException) {
-                lastException = e
-                if (attempt == maxAttempts) break
-                val delayMs = initialDelayMs * (1L shl (attempt - 1))
-                logger.warn("Rate limited (attempt {}/{}), retrying in {}s", attempt, maxAttempts, delayMs / 1000)
-                Thread.sleep(delayMs)
-            } catch (e: com.anthropic.errors.InternalServerException) {
-                lastException = e
-                if (attempt == maxAttempts) break
-                val delayMs = initialDelayMs * (1L shl (attempt - 1))
-                logger.warn("Server error (attempt {}/{}), retrying in {}s", attempt, maxAttempts, delayMs / 1000)
-                Thread.sleep(delayMs)
-            }
-        }
-        throw lastException!!
-    }
-
-    data class CategorizationResult(val category: String, val justification: String?)
-
     internal fun categorize(transaction: Transaction): CategorizationResult? {
-        // Store messages as Any since addMessage() accepts both MessageParam and Message
-        val messageHistory = mutableListOf<Any>(
-            MessageParam.builder()
-                .role(MessageParam.Role.USER)
-                .content(
-                    "Categorize this transaction:\n" +
-                        "Description: ${transaction.getDescription()}\n" +
-                        "Full Description: ${transaction.getFullDescription() ?: "N/A"}\n" +
-                        "Amount: ${transaction.getAmount()}\n" +
-                        "Account: ${transaction.getAccount()}\n" +
-                        "Date: ${transaction.getDate()}"
-                )
-                .build()
-        )
+        val userMessage =
+            "Categorize this transaction:\n" +
+                "Description: ${transaction.getDescription()}\n" +
+                "Full Description: ${transaction.getFullDescription() ?: "N/A"}\n" +
+                "Amount: ${transaction.getAmount()}\n" +
+                "Account: ${transaction.getAccount()}\n" +
+                "Date: ${transaction.getDate()}"
 
-        repeat(7) { // max tool-use rounds
-            val paramsBuilder = MessageCreateParams.builder()
-                .model(Model.of(config.anthropicModel))
-                .maxTokens(1024L)
-                .system(systemPrompt)
+        val tools = CategorizerTools()
 
-            for (tool in tools) {
-                paramsBuilder.addTool(tool)
-            }
+        chatClient.prompt()
+            .system(systemPrompt)
+            .user(userMessage)
+            .tools(tools)
+            .call()
+            .content()
 
-            for (msg in messageHistory) {
-                when (msg) {
-                    is MessageParam -> paramsBuilder.addMessage(msg)
-                    is com.anthropic.models.messages.Message -> paramsBuilder.addMessage(msg)
-                }
-            }
-
-            val response: com.anthropic.models.messages.Message = callApiWithRetry(paramsBuilder.build())
-
-            if (response.stopReason().orElse(null) != StopReason.TOOL_USE) {
-                // No tool calls — fallback to text response
-                val text = response.content()
-                    .firstOrNull { it.isText() }
-                    ?.asText()
-                    ?.text()
-                    ?.trim()
-                    ?: return null
-                logger.warn("Agent responded with text instead of submit_category tool: {}", text)
-                return if (text.equals("null", ignoreCase = true)) null
-                    else CategorizationResult(category = text, justification = null)
-            }
-
-            // Check if submit_category was called — that's our final answer
-            val submitCall = response.content()
-                .filter { it.isToolUse() }
-                .firstOrNull { it.asToolUse().name() == "submit_category" }
-
-            if (submitCall != null) {
-                @Suppress("UNCHECKED_CAST")
-                val args = submitCall.asToolUse()._input().asObject().get() as Map<String, JsonValue>
-                val category = args["category"]!!.asStringOrThrow()
-                val justification = args["justification"]?.asStringOrThrow()
-                return if (category.equals("null", ignoreCase = true)) null
-                    else CategorizationResult(category = category, justification = justification)
-            }
-
-            // Add the assistant's response (with tool_use blocks) back to the conversation
-            messageHistory.add(response)
-
-            // Execute each tool call and build result blocks
-            val toolResultBlocks = response.content()
-                .filter { it.isToolUse() }
-                .map { block ->
-                    val toolUse = block.asToolUse()
-                    @Suppress("UNCHECKED_CAST")
-                    val args = toolUse._input().asObject().get() as Map<String, JsonValue>
-
-                    val toolResult = when (toolUse.name()) {
-                        "sheet_lookup" -> sheetLookupTool.execute(args["query"]!!.asStringOrThrow())
-                        "web_search" -> webSearchTool.execute(args["query"]!!.asStringOrThrow())
-                        "category_lookup" -> {
-                            val category = args["category"]!!.asStringOrThrow()
-                            val results = sheetsClient.searchByCategory(category)
-                            logger.info("Category lookup '{}': {} transactions", category, results.size)
-                            com.google.gson.Gson().toJson(results)
-                        }
-                        "autocat_lookup" -> {
-                            val description = args["description"]!!.asStringOrThrow()
-                            val results = sheetsClient.searchAutocat(description)
-                            logger.info("AutoCat lookup '{}': {} rules matched", description, results.size)
-                            com.google.gson.Gson().toJson(results)
-                        }
-                        else -> "Unknown tool: ${toolUse.name()}"
-                    }
-
-                    logger.debug("Tool '{}' args='{}' result length={}", toolUse.name(), args, toolResult.length)
-
-                    ContentBlockParam.ofToolResult(
-                        ToolResultBlockParam.builder()
-                            .toolUseId(toolUse.id())
-                            .content(toolResult)
-                            .build()
-                    )
-                }
-
-            messageHistory.add(
-                MessageParam.builder()
-                    .role(MessageParam.Role.USER)
-                    .contentOfBlockParams(toolResultBlocks)
-                    .build()
-            )
+        val result = tools.submitResult ?: run {
+            logger.warn("Agent did not call submit_category for '{}'", transaction.getDescription())
+            return null
         }
-
-        logger.warn("Agent exhausted tool-use rounds for '{}'", transaction.getDescription())
-        return null
+        return if (result.category.isBlank() || result.category.equals("null", ignoreCase = true)) null
+        else result
     }
 }

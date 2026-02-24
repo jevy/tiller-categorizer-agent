@@ -18,7 +18,8 @@ val confluentVersion = "7.8.0"
 val googleSheetsVersion = "v4-rev20251110-2.0.0"
 val googleAuthVersion = "1.30.1"
 val okhttpVersion = "4.12.0"
-val anthropicVersion = "2.14.0"
+val springAiVersion = "1.1.2"
+val micrometerVersion = "1.14.4"
 val logbackVersion = "1.5.16"
 val slf4jVersion = "2.0.17"
 
@@ -34,8 +35,16 @@ dependencies {
     implementation("com.google.apis:google-api-services-sheets:$googleSheetsVersion")
     implementation("com.google.auth:google-auth-library-oauth2-http:$googleAuthVersion")
 
-    // Anthropic SDK (Claude API)
-    implementation("com.anthropic:anthropic-java:$anthropicVersion")
+    // Spring AI (OpenAI-compatible client, used with OpenRouter)
+    implementation(platform("org.springframework.ai:spring-ai-bom:$springAiVersion"))
+    implementation("org.springframework.ai:spring-ai-openai")
+    implementation("org.springframework.ai:spring-ai-client-chat")
+
+    // Metrics
+    implementation("io.micrometer:micrometer-registry-prometheus:$micrometerVersion")
+
+    // Jackson Kotlin module (required for Spring AI structured output with Kotlin data classes)
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
 
     // HTTP client (for Brave web search API)
     implementation("com.squareup.okhttp3:okhttp:$okhttpVersion")
