@@ -1,6 +1,6 @@
 # Tiller Categorizer Agent
 
-Automated transaction categorization for [Tiller](https://www.tillerhq.com/) spreadsheets. Reads uncategorized transactions from your Google Sheet, uses an AI agent (Claude) to determine the correct category, and writes the result back.
+Automated transaction categorization for [Tiller](https://www.tillerhq.com/) spreadsheets. Reads uncategorized transactions from your Google Sheet, uses an AI agent to determine the correct category, and writes the result back.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ Google Sheets
                 ▼ │
        ┌──────────┴──────┐
        │   Categorizer   │
-       │  (Claude Agent) │
+       │   (AI Agent)    │
        └─────────────────┘
 ```
 
@@ -39,7 +39,7 @@ Google Sheets
 - A [Tiller](https://www.tillerhq.com/) spreadsheet with the standard Transactions tab
 - A Google Cloud service account with access to the spreadsheet
 - A Kafka-compatible broker (tested with [Redpanda](https://redpanda.com/))
-- An [Anthropic API key](https://console.anthropic.com/)
+- An [OpenRouter API key](https://openrouter.ai/keys)
 - (Optional) A [Brave Search API key](https://brave.com/search/api/) for web search
 
 ## Configuration
@@ -52,10 +52,12 @@ All configuration is via environment variables:
 | `SCHEMA_REGISTRY_URL` | All | Schema registry URL |
 | `GOOGLE_SHEET_ID` | All | Spreadsheet ID from the Google Sheets URL |
 | `GOOGLE_CREDENTIALS_JSON` | All | Path to service account JSON key file |
-| `ANTHROPIC_API_KEY` | Categorizer | Anthropic API key |
-| `ANTHROPIC_MODEL` | Categorizer | Model to use (default: `claude-sonnet-4-6`) |
+| `OPENROUTER_API_KEY` | Categorizer | OpenRouter API key |
+| `MODEL` | Categorizer | Model to use (default: `anthropic/claude-sonnet-4-6`) |
 | `BRAVE_API_KEY` | Categorizer | Brave Search API key (optional) |
 | `ADDITIONAL_CONTEXT_PROMPT` | Categorizer | Extra context about the user for the agent (optional) |
+| `METRICS_PORT` | Categorizer, Writer | Prometheus metrics HTTP port (default: `9091`) |
+| `PUSHGATEWAY_URL` | Producer | Pushgateway URL for one-shot metrics (optional) |
 | `MAX_TRANSACTION_AGE_DAYS` | Producer | Skip transactions older than N days (default: 365) |
 | `MAX_TRANSACTIONS` | Producer | Limit transactions per run, 0 = unlimited (default: 0) |
 
