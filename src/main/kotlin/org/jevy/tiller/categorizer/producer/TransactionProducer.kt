@@ -75,9 +75,8 @@ class TransactionProducer(
         }
 
         producer.flush()
-        logger.info("Published {} uncategorized transactions", published)
-
         val scanned = rows.size - 1
+        logger.info("Scanned {} rows: published={}, skipped={}, errors={}", scanned, published, skipped, publishErrors.get())
         meterRegistry.counter("tiller.producer.rows.scanned").increment(scanned.toDouble())
         meterRegistry.counter("tiller.producer.transactions.published").increment(published.toDouble())
         meterRegistry.counter("tiller.producer.transactions.skipped").increment(skipped.toDouble())
@@ -85,21 +84,30 @@ class TransactionProducer(
     }
 
     companion object {
+        private val skipLogger = LoggerFactory.getLogger("TransactionProducer.skip")
+
         internal fun rowToTransaction(row: List<Any>, colIndex: Map<String, Int>, maxAgeDays: Long = 365, owner: String? = null): Transaction? {
             fun col(name: String): String? = colIndex[name]?.let { row.getOrNull(it)?.toString() }
 
             val category = col("Category") ?: ""
             if (category.isNotBlank()) return null
 
-            val transactionId = col("Transaction ID") ?: return null
-            if (transactionId.isBlank()) return null
+            val description = col("Description") ?: "(no description)"
+            val transactionId = col("Transaction ID")
+            if (transactionId == null || transactionId.isBlank()) {
+                skipLogger.info("Skipped row: missing Transaction ID — date={}, desc={}, cols={}", col("Date"), description, row.size)
+                return null
+            }
 
             // Skip transactions older than maxAgeDays
             val dateStr = col("Date") ?: ""
             if (dateStr.isNotBlank()) {
                 try {
                     val txDate = LocalDate.parse(dateStr, DateTimeFormatter.ofPattern("M/d/yyyy"))
-                    if (txDate.isBefore(LocalDate.now().minusDays(maxAgeDays))) return null
+                    if (txDate.isBefore(LocalDate.now().minusDays(maxAgeDays))) {
+                        skipLogger.info("Skipped row: too old ({}) — id={}, desc={}", dateStr, transactionId, description)
+                        return null
+                    }
                 } catch (_: DateTimeParseException) {
                     // If date can't be parsed, include the transaction
                 }
