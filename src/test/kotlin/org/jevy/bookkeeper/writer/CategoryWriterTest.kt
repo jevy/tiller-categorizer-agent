@@ -6,6 +6,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecords
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.common.TopicPartition
+import org.jevy.bookkeeper.DurableTransactionId
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
@@ -137,6 +138,29 @@ class CategoryWriterTest {
         assertEquals(3, writer.findRow(target, rows))
     }
 
+    @Test
+    fun `findRow skips tier 1 for durable IDs`() {
+        // Durable ID should skip tier 1 (ID match) and go straight to tier 2 (content match)
+        val rows = listOf(
+            SheetTransaction(2, makeTx("durable-different", date = "1/1/2026", description = "Test",
+                amount = "\$10", account = "Visa")),
+        )
+        val target = makeTx("durable-abc123", date = "1/1/2026", description = "Test",
+            amount = "\$10", account = "Visa")
+        assertEquals(2, writer.findRow(target, rows))
+    }
+
+    @Test
+    fun `findRow returns null when durable ID content does not match any row`() {
+        val rows = listOf(
+            SheetTransaction(2, makeTx("txn-100", date = "1/1/2026", description = "Other",
+                amount = "\$10", account = "Visa")),
+        )
+        val target = makeTx("durable-abc123", date = "3/1/2026", description = "Unique Store",
+            amount = "-\$50.00", account = "Savings")
+        assertNull(writer.findRow(target, rows))
+    }
+
     // --- writeCategory tests (mock sheetsClient.readAllRows()) ---
 
     @Test
@@ -185,6 +209,34 @@ class CategoryWriterTest {
     }
 
     @Test
+    fun `writeCategory works with durable ID via content matching`() {
+        val tx = makeTx(
+            transactionId = "durable-abc123",
+            date = "2/15/2026",
+            description = "COSTCO WHOLESAL",
+            category = "Groceries",
+            amount = "-\$384.91",
+            account = "Chequing",
+            owner = "test", // matches config.googleSheetId used by writeCategory
+        )
+
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(date = "2/15/2026", description = "COSTCO WHOLESAL",
+                amount = "-\$384.91", account = "Chequing"),
+        )
+        every { sheetsClient.readAllRows("Transactions!C2:C2") } returns
+            listOf(listOf("" as Any))
+
+        writer.writeCategory(tx)
+
+        verify { sheetsClient.writeCell("Transactions!C2", "Groceries") }
+        verify { sheetsClient.writeCell(match { it.startsWith("Transactions!P2") }, any()) }
+    }
+
+    // --- run() integration ---
+
+    @Test
     fun `run sends to DLQ and tombstones uncategorized when row not found`() {
         val consumer = mockk<KafkaConsumer<String, Transaction>>(relaxed = true)
         val dlqProducer = mockk<KafkaProducer<String, Transaction>>(relaxed = true)
@@ -214,7 +266,7 @@ class CategoryWriterTest {
             if (pollCount == 1) records else throw InterruptedException("stop")
         }
 
-        // Row not found — findRow returns null
+        // Row not found — readAllRows returns rows that don't match
         every { sheetsClient.readAllRows() } returns listOf(
             header,
             makeSheetRow(transactionId = "txn-100"),
@@ -231,6 +283,58 @@ class CategoryWriterTest {
         // Tombstoned from uncategorized to break the loop
         verify { tombstoneProducer.send(match { it.topic() == TopicNames.UNCATEGORIZED && it.key() == "txn-missing" && it.value() == null }) }
         // Batch still committed
+        verify(atLeast = 1) { consumer.commitSync() }
+    }
+
+    @Test
+    fun `run sends to DLQ and tombstones uncategorized on generic exception`() {
+        val consumer = mockk<KafkaConsumer<String, Transaction>>(relaxed = true)
+        val dlqProducer = mockk<KafkaProducer<String, Transaction>>(relaxed = true)
+        val tombstoneProducer = mockk<KafkaProducer<String, ByteArray?>>(relaxed = true)
+
+        mockkObject(KafkaFactory)
+        every { KafkaFactory.createConsumer(any(), any()) } returns consumer
+        every { KafkaFactory.createProducer(any()) } returns dlqProducer
+        every { KafkaFactory.createTombstoneProducer(any()) } returns tombstoneProducer
+
+        val tx = Transaction.newBuilder()
+            .setTransactionId("txn-100")
+            .setDate("1/1/2026")
+            .setDescription("Test")
+            .setCategory("Groceries")
+            .setAmount("\$10")
+            .setAccount("Visa")
+            .build()
+
+        val tp = TopicPartition(TopicNames.CATEGORIZED, 0)
+        val record = ConsumerRecord(TopicNames.CATEGORIZED, 0, 0L, "txn-100", tx)
+        val records = ConsumerRecords(mapOf(tp to listOf(record)))
+
+        var pollCount = 0
+        every { consumer.poll(any<Duration>()) } answers {
+            pollCount++
+            if (pollCount == 1) records else throw InterruptedException("stop")
+        }
+
+        // Row found but writeCell throws a generic exception
+        every { sheetsClient.readAllRows() } returns listOf(
+            header,
+            makeSheetRow(transactionId = "txn-100"),
+        )
+        every { sheetsClient.readAllRows("Transactions!C2:C2") } returns
+            listOf(listOf("" as Any))
+        every { sheetsClient.writeCell(any(), any()) } throws RuntimeException("Sheets API 500")
+
+        val writer = CategoryWriter(config, sheetsClient)
+
+        try {
+            writer.run()
+        } catch (_: InterruptedException) {}
+
+        // Sent to write-failed DLQ
+        verify { dlqProducer.send(match { it.topic() == TopicNames.WRITE_FAILED && it.key() == "txn-100" }) }
+        // Tombstoned from uncategorized (new behavior — generic exceptions also tombstone)
+        verify { tombstoneProducer.send(match { it.topic() == TopicNames.UNCATEGORIZED && it.key() == "txn-100" && it.value() == null }) }
         verify(atLeast = 1) { consumer.commitSync() }
     }
 }

@@ -1,6 +1,6 @@
 package org.jevy.bookkeeper.sheets
 
-import org.jevy.bookkeeper.producer.DurableTransactionId
+import org.jevy.bookkeeper.DurableTransactionId
 import org.jevy.bookkeeper_agent.Transaction
 
 data class SheetTransaction(

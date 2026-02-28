@@ -3,10 +3,10 @@ package org.jevy.bookkeeper.writer
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.jevy.bookkeeper.DurableTransactionId
 import org.jevy.bookkeeper.config.AppConfig
 import org.jevy.bookkeeper.kafka.KafkaFactory
 import org.jevy.bookkeeper.kafka.TopicNames
-import org.jevy.bookkeeper.producer.DurableTransactionId
 import org.jevy.bookkeeper.sheets.SheetTransaction
 import org.jevy.bookkeeper.sheets.SheetsClient
 import org.jevy.bookkeeper.sheets.TransactionMapper
@@ -76,8 +76,9 @@ class CategoryWriter(
                         tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     } catch (e: Exception) {
                         errorsCounter.increment()
-                        logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
+                        logger.error("Error writing category for transaction {}, sending to write-failed DLQ and tombstoning", transactionId, e)
                         dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     }
                 }
                 consumer.commitSync()
