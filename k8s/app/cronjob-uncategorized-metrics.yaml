@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: bookkeeper-uncategorized-metrics
+  labels:
+    app: bookkeeper
+    component: uncategorized-metrics
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 30
+      template:
+        metadata:
+          labels:
+            app: bookkeeper
+            component: uncategorized-metrics
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: uncategorized-metrics
+              image: alpine:3.21
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories
+                  apk add --no-cache grpcurl curl jq >/dev/null 2>&1
+                  COUNT=$(grpcurl -plaintext typestream-server.apps.svc.cluster.local:4242 io.typestream.grpc.StateQueryService/ListStores | jq -r '.stores[0].approximateCount')
+                  if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
+                    echo "ERROR: Failed to parse count from gRPC response"
+                    exit 1
+                  fi
+                  cat <<METRICS | curl --fail --silent --data-binary @- http://pushgateway.monitoring.svc.cluster.local:9091/metrics/job/bookkeeper-uncategorized-view
+                  # TYPE bookkeeper_uncategorized_transactions gauge
+                  bookkeeper_uncategorized_transactions $COUNT
+                  METRICS
+                  echo "Pushed bookkeeper_uncategorized_transactions=$COUNT"
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "200m"

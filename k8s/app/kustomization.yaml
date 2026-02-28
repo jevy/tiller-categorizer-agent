@@ -7,4 +7,5 @@ resources:
   - deployment-producer.yaml
   - deployment-categorizer.yaml
   - deployment-writer.yaml
+  - cronjob-uncategorized-metrics.yaml
   - prometheusrule.yaml
