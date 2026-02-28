@@ -8,12 +8,18 @@ import com.google.auth.http.HttpCredentialsAdapter
 import com.google.auth.oauth2.GoogleCredentials
 import org.jevy.bookkeeper.config.AppConfig
 import org.slf4j.LoggerFactory
+import com.google.api.client.http.HttpResponseException
 import java.io.ByteArrayInputStream
 import java.io.File
 
 class SheetsClient(private val config: AppConfig) {
 
     private val logger = LoggerFactory.getLogger(SheetsClient::class.java)
+
+    companion object {
+        internal const val WRITE_MAX_RETRIES = 5
+        internal const val WRITE_RETRY_BASE_MS = 2000L
+    }
 
     private val service: Sheets by lazy {
         val credentials = loadCredentials()
@@ -47,11 +53,24 @@ class SheetsClient(private val config: AppConfig) {
     fun writeCell(range: String, value: String) {
         val body = com.google.api.services.sheets.v4.model.ValueRange()
             .setValues(listOf(listOf(value)))
-        service.spreadsheets().values()
-            .update(config.googleSheetId, range, body)
-            .setValueInputOption("USER_ENTERED")
-            .execute()
-        logger.debug("Wrote '{}' to {}", value, range)
+        for (attempt in 1..WRITE_MAX_RETRIES) {
+            try {
+                service.spreadsheets().values()
+                    .update(config.googleSheetId, range, body)
+                    .setValueInputOption("USER_ENTERED")
+                    .execute()
+                logger.debug("Wrote '{}' to {}", value, range)
+                return
+            } catch (e: HttpResponseException) {
+                if (e.statusCode == 429 && attempt < WRITE_MAX_RETRIES) {
+                    val backoffMs = WRITE_RETRY_BASE_MS * (1L shl (attempt - 1))
+                    logger.warn("Rate limited writing to {}, attempt {}/{}, retrying in {}ms", range, attempt, WRITE_MAX_RETRIES, backoffMs)
+                    Thread.sleep(backoffMs)
+                } else {
+                    throw e
+                }
+            }
+        }
     }
 
     fun readCategories(): List<Map<String, String>> {

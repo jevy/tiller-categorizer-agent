@@ -13,6 +13,8 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
+class RowNotFoundException(message: String) : RuntimeException(message)
+
 class CategoryWriter(
     private val config: AppConfig,
     private val sheetsClient: SheetsClient = SheetsClient(config),
@@ -64,6 +66,11 @@ class CategoryWriter(
                         durationTimer.record(Runnable { writeCategory(record.value()) })
                         tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                         logger.debug("Tombstoned transaction {} from uncategorized", transactionId)
+                    } catch (e: RowNotFoundException) {
+                        errorsCounter.increment()
+                        logger.error("Row not found for transaction {}, sending to write-failed DLQ and tombstoning from uncategorized", transactionId, e)
+                        dlqProducer.send(ProducerRecord(TopicNames.WRITE_FAILED, transactionId, record.value()))
+                        tombstoneProducer.send(ProducerRecord(TopicNames.UNCATEGORIZED, transactionId, null))
                     } catch (e: Exception) {
                         errorsCounter.increment()
                         logger.error("Error writing category for transaction {}, sending to write-failed DLQ", transactionId, e)
@@ -89,9 +96,8 @@ class CategoryWriter(
         val rowNumber = findRow(transactionId)
 
         if (rowNumber == null) {
-            logger.warn("Could not find row for transaction {}", transactionId)
             skippedCounter.increment()
-            return
+            throw RowNotFoundException("Could not find row for transaction $transactionId")
         }
 
         val categoryCol = columnLetters["Category"] ?: "C"
